@@ -1,0 +1,20 @@
+{
+  "name": "purescript-swagger",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "output"
+  ],
+  "dependencies": {
+    "purescript-prelude": "^3.0.0",
+    "purescript-console": "^3.0.0",
+    "purescript-maps": "^3.0.0",
+    "purescript-sets": "^3.0.0",
+    "purescript-tuples": "^4.0.0",
+    "purescript-either": "^3.0.0"
+  },
+  "devDependencies": {
+    "purescript-psci-support": "^3.0.0"
+  }
+}
