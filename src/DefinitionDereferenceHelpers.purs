@@ -1,14 +1,14 @@
 module DefinitionDereferenceHelpers where
 
 import Swagger
-import Prelude (($), map)
-import Data.List as List
 import Data.Map as Map
-import Control.Alt (alt)
-import Control.Bind ((=<<))
+import Data.Either (Either(..))
+import Data.Foldable (foldl, foldr)
+import Data.List (List(..), (:), null)
 import Data.Maybe (Maybe(..))
-import Data.Set (Set, singleton, empty, union)
+import Data.Set (Set, singleton, empty, union, insert, fromFoldable)
 import Data.Tuple (Tuple(..))
+import Prelude (($), map, (#), (<>))
 
 type InputDefinition =
     { definitionOrReference :: SchemaOrReference
@@ -17,7 +17,7 @@ type InputDefinition =
 
 type DereferencingMap a =
   { resolvedReferences :: Map.Map String a
-  , unresolvableKeys :: Set String
+  , unresolvableReferences :: Set String
   }
 
 type DereferencingMapSchemas =
@@ -34,14 +34,11 @@ collectReferences (SpecifiedSchema schema) =
 
       TypeObject fieldsList ->
           let
-              fields =
-                  Map.fromFoldable $ map (\{ fieldname, content } -> Tuple fieldname content ) fieldsList
-
               fieldsAsRefSets =
-                  map (\key val -> collectReferences val) fields
+                  map (\field -> collectReferences field.content) fieldsList
 
               mergedRefSets =
-                  List.foldr union empty (Map.values fieldsAsRefSets)
+                  foldr union empty (fromFoldable $ fieldsAsRefSets)
           in
               mergedRefSets
 
@@ -49,10 +46,11 @@ collectReferences (SpecifiedSchema schema) =
           collectReferences arraySchema
 
 
-fillSchema :: DereferencingMapSchemas -> SchemaWithRefs -> SchemaWithoutRefs
+fillSchema :: DereferencingMapSchemas -> SchemaWithRefs -> Maybe SchemaWithoutRefs
 fillSchema dereferencedDefinitions schema =
     case schema.fieldType of
         TypeSimple val ->
+            Just $
             { fieldType : (TypeSimple val)
             , description : schema.description
             , xNullable : schema.xNullable
@@ -61,23 +59,56 @@ fillSchema dereferencedDefinitions schema =
 
         TypeObject fields ->
             let
-                dereferencedFields =
-                    map (\{ fieldname, content } -> { fieldname : fieldname, content : SchemaValue $ (fillSchemaReferences dereferencedDefinitions content)}) fields
+                dereferencedAndUndereferencedFields =
+                  map (\{ fieldname, content } ->
+                    let
+                      maybeDereferencedField = fillSchemaReferences dereferencedDefinitions content
+
+                      eitherResult =
+                        case maybeDereferencedField of
+                          Nothing ->
+                            Left fieldname
+
+                          Just dereferencedField ->
+                            Right ({ fieldname : fieldname, content : SchemaValue dereferencedField })
+
+                    in
+                      eitherResult
+                    )
+                    fields
+
+                foldFn :: forall a b . Tuple (List a) (List b) -> Either a b -> Tuple (List a) (List b)
+                foldFn (Tuple alist blist) (Left aitem) = Tuple (aitem : alist) blist
+                foldFn (Tuple alist blist) (Right bitem) = Tuple alist (bitem : blist)
+
+                partitionList :: forall a b . List (Either a b) -> Tuple (List a) (List b)
+                partitionList list =
+                  foldl foldFn (Tuple Nil Nil) list
+
+                -- We drop the unresolveable references here for now
+                (Tuple unresolvedFieldNames dereferencedFields) =
+                  partitionList dereferencedAndUndereferencedFields
 
                 newFields =
                     TypeObject dereferencedFields
             in
-                schema { fieldType = newFields }
+                if null unresolvedFieldNames then
+                  Just schema { fieldType = newFields }
+                else
+                  Nothing
 
         TypeArray arrayType ->
             let
-                newArrayType =
+                maybeNewArrayType =
                     fillSchemaReferences dereferencedDefinitions arrayType
 
-                newArray =
-                    TypeArray (SchemaValue newArrayType)
+                maybeNewArray =
+                    map (\newArrayType -> TypeArray (SchemaValue newArrayType)) maybeNewArrayType
+
+                maybeNewSchema =
+                    map (\newArray -> schema { fieldType = newArray }) maybeNewArray
             in
-                schema { fieldType = newArray }
+                maybeNewSchema
 
 
 fillSchemaReferences :: DereferencingMapSchemas -> SchemaOrReference -> Maybe SchemaWithoutRefs
@@ -86,7 +117,7 @@ fillSchemaReferences dereferencedDefinitions schemaOrRef =
         ReferencedSchema ref ->
             let
                 referenced =
-                    Map.lookup ref dereferencedDefinitions
+                    Map.lookup ref dereferencedDefinitions.resolvedReferences
             in
                 case referenced of
                     Nothing ->
@@ -96,60 +127,104 @@ fillSchemaReferences dereferencedDefinitions schemaOrRef =
                         Just referencedSchema
 
         SpecifiedSchema schema ->
-            Just $ fillSchema dereferencedDefinitions schema
+            fillSchema dereferencedDefinitions schema
 
 
-dereferenceDefinition :: Map.Map String InputDefinition -> String -> InputDefinition -> Map.Map String SchemaWithoutRefs -> Map.Map String SchemaWithoutRefs
-dereferenceDefinition undereferencedDefs defKey def alreadyDereferenced =
-    case Dict.get defKey alreadyDereferenced of
+dereferenceDefinition :: Map.Map String InputDefinition -> DereferencingMapSchemas -> String -> InputDefinition -> DereferencingMapSchemas
+dereferenceDefinition undereferencedDefs alreadyDereferenced defKey def  =
+    case Map.lookup defKey alreadyDereferenced.resolvedReferences of
         Nothing ->
             let
-                requiredReferences =
-                    def.references
-                        |> Set.toList
-                        |> List.map (\ref -> Tuple ref (Map.get ref undereferencedDefs))
-                        |> List.filterMap
-                            (\Tuple ref maybeItem  ->
-                                case maybeItem of
-                                    Nothing ->
-                                        Nothing
+                updatedDereferencedMap =
+                  def.references
+                    # foldl (\currentDereferenced ref ->
+                        let
+                          maybeItem = Map.lookup ref undereferencedDefs
+                          updatedDereferenced =
+                            case maybeItem of
+                              Nothing ->
+                                currentDereferenced { unresolvableReferences = insert ref currentDereferenced.unresolvableReferences }
 
-                                    Just item ->
-                                        Just (Tuple ref item )
-                            )
-                        |> Dict.fromList
-                        |> Dict.foldl (dereferenceDefinition undereferencedDefs) alreadyDereferenced
+                              Just item ->
+                                let
+                                  updatedMap =
+                                    dereferenceDefinition undereferencedDefs currentDereferenced ref item
 
-                dereferencesSoFar =
-                    Dict.union alreadyDereferenced requiredReferences
+                                  --updatedMap =
+                                  --  case dereferencedItem.dereferencedDefinition of
+                                  --    Nothing ->
+                                  --      currentDereferenced { unresolvableReferences = insert ref currentDereferenced.unresolvableReferences }
+                                  --    Just dereferenedItem ->
+                                  --      currentDereferenced { resolvedReferences = Map.insert ref dereferenedItem currentDereferenced.resolvedReferences }
+                                in
+                                  updatedMap
 
-                filledDef =
-                    fillSchemaReferences dereferencesSoFar def.definitionOrReference
+                        in
+                          updatedDereferenced
+                      )
+                      alreadyDereferenced
+
+                maybeFilledDef =
+                    fillSchemaReferences updatedDereferencedMap def.definitionOrReference
 
                 newDict =
-                    Dict.insert defKey filledDef dereferencesSoFar
+                  case maybeFilledDef of
+                    Nothing ->
+                      updatedDereferencedMap { unresolvableReferences = insert defKey updatedDereferencedMap.unresolvableReferences }
+
+                    Just filledDef ->
+                      updatedDereferencedMap { resolvedReferences = Map.insert defKey filledDef updatedDereferencedMap.resolvedReferences }
             in
                 newDict
 
-        Just _ ->
+
+        Just retrieved ->
             alreadyDereferenced
 
+wrapInTuple :: forall b k v . (b -> k -> v -> b) -> (b -> Tuple k v -> b)
+wrapInTuple fn =
+  (\acc (Tuple key val) ->
+    fn acc key val
+  )
 
-dereferenceDefinitions :: Map.Map String SchemaWithoutRefs -> Map.Map String SchemaOrReference -> Map.Map String SchemaOnly
+foldlWithKeys :: forall k v b . (b -> Tuple k v -> b) -> b -> Map.Map k v -> b
+foldlWithKeys f acc m =
+  m
+  # (Map.toUnfoldable :: (Map.Map k v -> List (Tuple k v)))
+  # foldl f acc
+
+dereferenceDefinitions :: Map.Map String SchemaWithoutRefs -> Map.Map String SchemaOrReference -> DereferencingMapSchemas
 dereferenceDefinitions dereferencedDefinitionsFromOtherSection definitions =
     let
         -- when we parse the swagger, the definitions dict will have keys like "Aggregations" but we need
         -- them to match the way they are referenced, i.e. "#/definitions/Aggregations"
         definitionsWithFullyReferencedKeys =
-            Dict.foldl (\key val newDict -> Dict.insert ("#/definitions/" ++ key) val newDict) Dict.empty definitions
+            foldlWithKeys (\newDict (Tuple key val) -> Map.insert ("#/definitions/" <> key) val newDict) Map.empty definitions
 
         inputDefinitions =
-            Dict.map (\key val -> InputDefinition val (collectReferences val)) definitionsWithFullyReferencedKeys
+            Map.mapWithKey
+                (\key val ->
+                { definitionOrReference : val
+                ,  references : (collectReferences val)
+                })
+                definitionsWithFullyReferencedKeys
+
+        startAcc =
+          { resolvedReferences : dereferencedDefinitionsFromOtherSection
+          , unresolvableReferences : empty
+          }
+
+        --dereferencedFoldFn :: DereferencingMapSchemas -> Tuple String InputDefinition -> DereferencingMapSchema
+        --dereferencedFoldFn acc (Tuple key def) =
+        --  let
+        --    dereferenceDefinition inputDefinitions
+        --  in
+
 
         convertedDefinitions =
-            Dict.foldl (dereferenceDefinition inputDefinitions) dereferencedDefinitionsFromOtherSection inputDefinitions
+            foldlWithKeys (wrapInTuple $ dereferenceDefinition inputDefinitions) startAcc inputDefinitions
 
-        result =
-            convertedDefinitions |> Dict.map (\key val -> SchemaValue val)
+        --result =
+        --    convertedDefinitions # Map.mapWithKey (\key val -> SchemaValue val)
     in
-        result
+        convertedDefinitions
