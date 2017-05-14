@@ -12,7 +12,8 @@
     "purescript-maps": "^3.0.0",
     "purescript-sets": "^3.0.0",
     "purescript-tuples": "^4.0.0",
-    "purescript-either": "^3.0.0"
+    "purescript-either": "^3.0.0",
+    "purescript-foreign": "^4.0.0"
   },
   "devDependencies": {
     "purescript-psci-support": "^3.0.0"
