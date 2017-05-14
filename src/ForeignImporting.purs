@@ -1,13 +1,10 @@
 module ForeignImporting where
 
 import Prelude
-
+import Control.Bind ((=<<))
 import Data.Foreign (F, Foreign, readNumber, readBoolean, readInt, readString, fail, ForeignError(..))
 import Data.Foreign.Index ((!))
-import Swagger (CollectionFormat(..),
-                ParameterLocation(..),
-                DefaultValue(..)
-                )
+import Swagger (CollectionFormat(..), ParameterLocation(..), DefaultValue(..))
 
 data Point = Point Number Number Number
 
@@ -60,21 +57,18 @@ readParameterLocation value =
           other ->
               fail $ ForeignError ("Unexpected in value " <> other)
 
-readDefault :: String -> Foreign -> F DefaultValue
-readDefault paramType value =
-  case paramType of
-      "integer" ->
-          readInt value >>= (\bla -> pure $ IntDefault bla)
-          -- readInt >>> (map $ IntDefault)
+composeWithMap :: forall a b c f
+                  . Bind f
+                  => Applicative f
+                  => (a -> f b) -> (b -> c) -> (a -> f c)
+composeWithMap func mapFunc =
+  func >=> (\b -> pure $ mapFunc b)
 
-      "number" ->
-          map FloatDefault readNumber
+infixr 1 composeWithMap as >=>>
 
-      "string" ->
-          map StringDefault readString
-
-      "boolean" ->
-          map BoolDefault readBoolean
-
-      other ->
-          fail $ ForeignError ("Got unknown default type " <> other)
+readDefault :: String -> (Foreign -> F DefaultValue)
+readDefault "integer" = readInt >=>> IntDefault
+readDefault "float" = readNumber >=>> FloatDefault
+readDefault "string" = readString >=>> StringDefault
+readDefault "bool" = readBoolean >=>> BoolDefault
+readDefault val = (\_ -> fail $ ForeignError ("Got unknown default type " <> val))
