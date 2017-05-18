@@ -62,7 +62,7 @@ composeWithMap :: forall a b c f
                   => Applicative f
                   => (a -> f b) -> (b -> c) -> (a -> f c)
 composeWithMap func mapFunc =
-  func >=> (\b -> pure $ mapFunc b)
+  func >=> mapFunc >>> pure
 
 infixr 1 composeWithMap as >=>>
 
