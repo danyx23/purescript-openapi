@@ -103,6 +103,29 @@ type Parameter parameter =
     , default :: Maybe DefaultValue
     }
 
+createParameter :: forall parameter .
+                   ParameterType parameter ->
+                   String ->
+                   Maybe String ->
+                   ParameterLocation ->
+                   Boolean ->
+                   Maybe DefaultValue ->
+                   Parameter parameter
+createParameter parameterType
+                name
+                description
+                inLocation
+                required
+                default =
+  { parameterType : parameterType
+  , name : name
+  , description : description
+  , inLocation : inLocation
+  , required : required
+  , default : default
+  }
+
+
 
 data ParameterType parameter
     = ParameterTypeSimple SimpleDataType
